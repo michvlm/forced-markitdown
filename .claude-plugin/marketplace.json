@@ -1,0 +1,13 @@
+{
+  "name": "forced-markitdown",
+  "owner": {
+    "name": "michal"
+  },
+  "plugins": [
+    {
+      "name": "forced-markitdown",
+      "source": "./"
+    }
+  ],
+  "description": "Claude Code plugin: documents to Markdown via markitdown, with images and on-demand chart previews"
+}
