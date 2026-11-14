@@ -1,7 +1,7 @@
 {
   "name": "forced-markitdown",
   "version": "1.1.0",
-  "description": "Automatycznie podmienia PDF/DOCX/PPTX/XLSX i inne na Markdown z markitdown (z obrazami), zanim trafią do modelu.",
+  "description": "Automatically replaces PDF/DOCX/PPTX/XLSX and other files with Markdown from markitdown (with images) before they reach the model.",
   "author": {
     "name": "michal"
   },

@@ -1,45 +1,45 @@
-# forced-markitdown - jak to działa
+# forced-markitdown - how it works
 
-## Pliki
+## Files
 
-| Plik | Rola |
+| File | Role |
 | --- | --- |
-| `.claude-plugin/plugin.json` | Manifest pluginu |
-| `.claude-plugin/marketplace.json` | Lokalny marketplace (source `./`), żeby dało się zainstalować z folderu |
-| `hooks/hooks.json` | Wskazuje moduł hooków |
-| `hooks/register.ts` | Cała logika po stronie Claude Code (hooki, komendy) |
-| `scripts/konwertuj.py` | Konwersja przez markitdown, obrazy, cache. Zwraca JSON w ostatniej linii stdout |
-| `tests/forced-markitdown.test.ts` | Testy hooków (`claude plugin test .`), Python udawany przez hook `process.run` |
-| `tsconfig.json` | Do type-checku (`tsc -p .`, gdy silnik położy typy w `.claude-plugin/types`) |
+| `.claude-plugin/plugin.json` | Plugin manifest |
+| `.claude-plugin/marketplace.json` | Local marketplace (source `./`), so it can be installed from the folder |
+| `hooks/hooks.json` | Points to the hooks module |
+| `hooks/register.ts` | All the logic on the Claude Code side (hooks, commands) |
+| `scripts/convert.py` | Conversion via markitdown, images, cache. Returns JSON on the last line of stdout |
+| `tests/forced-markitdown.test.ts` | Hook tests (`claude plugin test .`), Python faked by the `process.run` hook |
+| `tsconfig.json` | For type-checking (`tsc -p .`, once the engine puts types in `.claude-plugin/types`) |
 
-## Przepływ
+## Flow
 
-1. **`tool.call` (Read)** - plik z obsługiwanym rozszerzeniem -> `konwertuj()` -> `next({...e, file_path: md})`. `pages` jest usuwane i (dla PDF ze znacznikami) zamieniane na `offset`/`limit`. Do wyniku dochodzi `context` z notką (gdzie obrazy, jak je otworzyć). Błąd konwersji -> `next(e)` bez zmian + toast.
-2. **`prompt.mention`** - `@plik.pdf` -> `next({...e, path: md})` + notka w `context`.
-3. **`prompt.submit`** - załącznik typu `document` (PDF wklejony do prompta): bajty przez `$.prompt.media` (kawałkami po 4 MiB, base64 sklejany) -> Python przez stdin -> treść `.md` w `context`. Flaga `usunDokumenty` mówi hookowi `session.append` (door `prompt`), ile bloków `document` wyrzucić z wiersza prompta. Usuwamy tylko, gdy wszystkie konwersje się udały.
-4. **`tool.check` (Read)** - ścieżka w folderze cache -> werdykt jak dla `Read` oryginału (`$.tool.check` na źródle). Źródło z mapy sesji, a po przeładowaniu albo w nowej sesji z `meta.json` folderu (tylko pod `%USERPROFILE%\.claude\markitdown-cache`). Załączniki (`null` w mapie, źródło w `zalaczniki/`) -> `allow`. Ścieżka sprawdzana po `realPath`, więc `..` nie wyprowadzi poza folder.
-5. **Podgląd strony z grafiką (leniwy)** - `Read` na `…/strony/strona_NNN.png`, którego nie ma -> Python `podglad` renderuje stronę -> `next(e)` czyta gotowy plik. Model sam decyduje, kiedy go otworzyć (znacznik w `.md` + notka w `context`).
-6. **Komendy** - rejestrowane w `session.start`, obsługiwane przez `command.run`. Stan wł./wył. w `$.store` (`wlaczony`), czyli między sesjami.
+1. **`tool.call` (Read)** - file with a supported extension -> `convert()` -> `next({...e, file_path: md})`. `pages` is removed and (for PDFs with markers) turned into `offset`/`limit`. A `context` note is added to the result (where the images are, how to open them). Conversion error -> `next(e)` unchanged + toast.
+2. **`prompt.mention`** - `@file.pdf` -> `next({...e, path: md})` + note in `context`.
+3. **`prompt.submit`** - a `document` attachment (PDF pasted into the prompt): bytes via `$.prompt.media` (chunks of 4 MiB, base64 joined) -> Python via stdin -> `.md` content in `context`. The `dropDocuments` flag tells the `session.append` hook (door `prompt`) how many `document` blocks to drop from the prompt row. We drop them only if every conversion succeeded.
+4. **`tool.check` (Read)** - path in the cache folder -> verdict as for the original `Read` (`$.tool.check` on the source). The source comes from the session map, and after a module reload or in a new session from the folder's `meta.json` (only under `%USERPROFILE%\.claude\markitdown-cache`). Attachments (`null` in the map, source in `attachments/`) -> `allow`. The path is checked by `realPath`, so `..` cannot escape the folder.
+5. **Page preview with graphics (lazy)** - `Read` on `…/pages/page_NNN.png` that does not exist yet -> Python `preview` renders the page -> `next(e)` reads the ready file. The model decides when to open it (marker in the `.md` + note in `context`).
+6. **Commands** - registered in `session.start`, handled by `command.run`. On/off state lives in `$.store` (`enabled`), so it persists between sessions.
 
-## Trudne rozwiązania
+## Hard solutions
 
-- **Import markitdown trwa ~4 s** (magika/onnxruntime). Skrypt sprawdza cache (`meta.json`: `mtime_ns`, rozmiar, `WERSJA_CACHE`) *przed* importem. Zmiana formatu wyjścia = podbij `WERSJA_CACHE`.
-- **Równoległe odczyty tego samego pliku** - `wTrakcie: Map<ścieżka, Promise>` w TS, więc jeden plik konwertuje jeden proces.
-- **Obrazy DOCX/PPTX** - `convert(..., keep_data_uris=True)` daje base64 w Markdown. Regex `DATA_URI` wycina je do `obrazy/obraz_NNN.ext` (dedup po SHA-1 treści) i wstawia ścieżkę bezwzględną (z `<...>`, gdy jest spacja).
-- **Obrazy PDF** - markitdown ich nie wyciąga. `pypdfium2` (zależność pdfplumber): `page.get_objects(FPDF_PAGEOBJ_IMAGE)` -> `PdfImage.extract()` (JPEG bez rekompresji, reszta PNG). Pomijane < 48 px. Limit 300 obrazów na plik.
-- **Strony PDF** - pdfminer rozdziela strony znakiem `\f`; jeśli jest, tekst dzielimy i wstawiamy `<!-- strona N -->` + obrazy danej strony. Numery linii znaczników idą do `strony` w JSON i służą do mapowania `pages`. Ścieżka pdfplumber (tabele/formularze) nie ma `\f` -> obrazy w sekcji na końcu.
-- **Skany** - strona bez tekstu i bez obrazów -> `page.render(scale=2)` do PNG.
-- **Wykrywanie grafiki (przy konwersji, bez renderu)** - `obiektyStrony()` bierze obiekty poziomu 0 z ramkami (granice obiektów w Form XObject pdfium podaje w układzie formularza, więc liczy je tylko jako zawartość rodzica). `powtarzalne()`: ten sam typ i ta sama ramka (zaokrąglona do 1 pt) na ≥30% stron (min. 2) = logo/stopka. `analizaStrony()` pomija tło (>90% strony), pasy 7% u góry/dołu i powtarzalne. Strona ma grafikę przy ≥1 obrazie ≥48 px albo ≥8 ścieżkach (`MIN_SCIEZEK`). Powtarzalne obrazy (logo) nie są też linkowane przy każdej stronie.
-- **Kadr podglądu** - ramka grafiki + zapas 4% (podpisy osi). Zapas nie wchodzi na wykluczone elementy leżące w całości po zewnętrznej stronie grafiki (logo nad, stopka pod). Render tylko kadru (`render(crop=…)`) w skali dającej ~1500 px dłuższego boku (1,5-4x). Potem `cofnijKrawedzie()`: krawędź przecinająca treść (pół linii tekstu) cofa się do pierwszej pustej linii, najwyżej o zapas. Na koniec cięcie bieli. Strona obrócona (`/Rotate`) -> tylko cięcie bieli, bo współrzędne kadru nie są pewne.
-- **Bezpieczeństwo podglądu** - Python renderuje tylko pod katalogiem cache, a źródło bierze z `meta.json`, nie ze ścieżki od modelu.
-- **Uprawnienia** - cache leży poza projektem, więc zwykły `Read` z cache pytałby o zgodę albo, gdyby dać `allow`, obchodził reguły. Mapa `folder cache -> źródło` + `$.tool.check` na źródle daje dokładnie te same decyzje co dla oryginału.
-- **Stdout Pythona** - biblioteki potrafią coś wypisać, więc konwersja idzie w `redirect_stdout(stderr)`, a TS bierze ostatnią linię stdout. `-X utf8` + `ensure_ascii=True`, żeby polskie znaki nie psuły JSON na Windows.
-- **Python** - próbowane kolejno `python`, `py -3`, `python3`; pierwszy działający zapamiętany do przeładowania modułu. Bez `-I`, bo markitdown siedzi w user site-packages.
+- **markitdown import takes ~4 s** (magika/onnxruntime). The script checks the cache (`meta.json`: `mtime_ns`, size, `CACHE_VERSION`) *before* the import. Changing the output format = bump `CACHE_VERSION`.
+- **Parallel reads of the same file** - `inFlight: Map<path, Promise>` in TS, so one file is converted by one process at a time.
+- **DOCX/PPTX images** - `convert(..., keep_data_uris=True)` gives base64 in the Markdown. The `DATA_URI` regex cuts them out into `images/image_NNN.ext` (dedup by SHA-1 of the content) and inserts the absolute path (wrapped in `<...>` when there is a space).
+- **PDF images** - markitdown does not extract them. `pypdfium2` (a pdfplumber dependency): `page.get_objects(FPDF_PAGEOBJ_IMAGE)` -> `PdfImage.extract()` (JPEG without recompression, the rest as PNG). Images < 48 px are skipped. Limit 300 images per file.
+- **PDF pages** - pdfminer separates pages with the `\f` character; if it is present, the text is split and `<!-- page N -->` plus that page's images are inserted. The line numbers of the markers go to `pages` in the JSON and are used to map `pages` in `Read`. The pdfplumber path (tables/forms) has no `\f` -> images go into a section at the end.
+- **Scans** - a page with no text and no images -> `page.render(scale=2)` to PNG.
+- **Graphics detection (at conversion time, no render)** - `pageObjects()` takes top-level objects with bboxes (pdfium gives bounds of objects inside a Form XObject in form coordinates, so only the parent's content is counted). `repeated()`: same type and same bbox (rounded to 1 pt) on >=30% of pages (min. 2) = logo/footer. `analyzePage()` skips the background (>90% of the page), the 7% bands at the top/bottom, and repeated elements. A page has graphics if it has >=1 image >= 48 px or >=8 paths (`MIN_PATHS`). Repeated images (logos) are not linked on every page either.
+- **Preview crop** - graphics bbox + a 4% margin (axis labels). The margin does not enter excluded elements that lie entirely outside the graphic (logo above, footer below). Only the crop is rendered (`render(crop=...)`), at a scale giving ~1500 px on the long side (1.5-4x). Then `trimEdges()`: an edge that crosses content (half a text line) is pulled back to the first empty line, at most by the margin. At the end, white trimming. A rotated page (`/Rotate`) gets only white trimming, because the crop coordinates are not reliable there.
+- **Preview safety** - Python renders only under the cache dir, and takes the source from `meta.json`, not from a path given by the model.
+- **Permissions** - the cache lives outside the project, so a plain `Read` from the cache would ask for consent or, if allowed, bypass the rules. The map `cache folder -> source` + `$.tool.check` on the source gives exactly the same decisions as for the original.
+- **Python stdout** - libraries can print things, so the conversion runs inside `redirect_stdout(stderr)` and TS takes the last line of stdout. `-X utf8` + `ensure_ascii=True`, so non-ASCII characters don't break the JSON on Windows.
+- **Python** - tried in order: `python`, `py -3`, `python3`; the first one that works is remembered until the module reloads. No `-I`, because markitdown lives in the user site-packages.
 
-## Testy
+## Tests
 
 ```bash
-python -X utf8 scripts/konwertuj.py selftest
+python -X utf8 scripts/convert.py selftest
 ```
 
 ```bash

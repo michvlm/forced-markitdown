@@ -2,173 +2,173 @@ import type { EngineInterface, Register } from 'claude-code'
 
 type $T = EngineInterface
 
-// Formaty, które model dostaje jako .md. Bez html/csv/json/xml/ipynb/obrazów:
-// to pliki źródłowe/obrazy, które model czyta (i edytuje) lepiej sam.
-const OBSLUGIWANE = ['.pdf', '.docx', '.pptx', '.xlsx', '.xls', '.msg', '.epub', '.zip', '.mp3', '.wav', '.m4a']
-const PYTHONY = [['python'], ['py', '-3'], ['python3']]
-// Podgląd strony PDF z grafiką: plik powstaje dopiero przy pierwszym Read.
-const PODGLAD = /[\\/]strony[\\/]strona_\d+\.png$/i
-const KOMENDY = [
-  { name: 'markitdown-status', description: 'forced-markitdown: stan, wersje, cache' },
-  { name: 'markitdown-on', description: 'forced-markitdown: włącz automatyczną konwersję' },
-  { name: 'markitdown-off', description: 'forced-markitdown: wyłącz automatyczną konwersję' },
-  { name: 'markitdown-convert', description: 'forced-markitdown: skonwertuj plik do .md teraz', argumentHint: '<ścieżka> [--wymus]' },
-  { name: 'markitdown-clear', description: 'forced-markitdown: wyczyść cache skonwertowanych plików' },
+// Formats the model gets as .md. No html/csv/json/xml/ipynb/images:
+// those are source/image files the model reads (and edits) better on its own.
+const SUPPORTED = ['.pdf', '.docx', '.pptx', '.xlsx', '.xls', '.msg', '.epub', '.zip', '.mp3', '.wav', '.m4a']
+const PYTHONS = [['python'], ['py', '-3'], ['python3']]
+// PDF page preview with graphics: the file is created only at the first Read.
+const PREVIEW_RE = /[\\/]pages[\\/]page_\d+\.png$/i
+const COMMANDS = [
+  { name: 'markitdown-status', description: 'forced-markitdown: state, versions, cache' },
+  { name: 'markitdown-on', description: 'forced-markitdown: enable automatic conversion' },
+  { name: 'markitdown-off', description: 'forced-markitdown: disable automatic conversion' },
+  { name: 'markitdown-convert', description: 'forced-markitdown: convert a file to .md now', argumentHint: '<path> [--force]' },
+  { name: 'markitdown-clear', description: 'forced-markitdown: clear the cache of converted files' },
 ]
 
-type Wynik = {
+type Result = {
   ok: boolean
-  blad?: string
-  zrodlo?: string
+  error?: string
+  source?: string
   md?: string
   folder?: string
-  obrazyDir?: string
-  obrazy?: number
-  strony?: number[]
-  podglady?: number[]
-  linie?: number
-  zCache?: boolean
-  katalogZalacznika?: string
-  [klucz: string]: unknown
+  imagesDir?: string
+  images?: number
+  pages?: number[]
+  previews?: number[]
+  lines?: number
+  cached?: boolean
+  attachmentDir?: string
+  [key: string]: unknown
 }
 
 let python: string[] | undefined
-let stan: boolean | undefined
-let konwersjeSesji = 0
-let usunDokumenty = 0
-const wTrakcie = new Map<string, Promise<Wynik>>()
-// folder w cache -> plik źródłowy (null = załącznik wklejony przez użytkownika)
-const zrodla = new Map<string, string | null>()
+let state: boolean | undefined
+let sessionConversions = 0
+let dropDocuments = 0
+const inFlight = new Map<string, Promise<Result>>()
+// folder in cache -> source file (null = attachment pasted by the user)
+const sources = new Map<string, string | null>()
 
 const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
-const nazwa = (p: string) => p.split(/[\\/]/).pop() ?? p
-const rozszerzenie = (p: string) => (/\.[^./\\]+$/.exec(p)?.[0] ?? '').toLowerCase()
-const obslugiwany = (p: string) => OBSLUGIWANE.includes(rozszerzenie(p))
+const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p
+const extension = (p: string) => (/\.[^./\\]+$/.exec(p)?.[0] ?? '').toLowerCase()
+const isSupported = (p: string) => SUPPORTED.includes(extension(p))
 
-async function wlaczony($: $T) {
-  stan ??= (await $.store.get('wlaczony')) !== false
-  return stan
+async function enabled($: $T) {
+  state ??= (await $.store.get('enabled')) !== false
+  return state
 }
 
-async function ustawStan($: $T, wartosc: boolean) {
-  stan = wartosc
-  await $.store.set('wlaczony', wartosc)
-  $.ui.status(wartosc ? undefined : 'markitdown: wył.')
+async function setState($: $T, value: boolean) {
+  state = value
+  await $.store.set('enabled', value)
+  $.ui.status(value ? undefined : 'markitdown: off')
 }
 
-/** Odpala skrypt Pythona; zwraca jego JSON (ostatnia linia stdout). */
-async function uruchom($: $T, argv: string[], stdin?: string): Promise<Wynik> {
-  const skrypt = `${$.plugin.root}/scripts/konwertuj.py`
-  let blad = 'brak Pythona na PATH (python / py / python3)'
-  for (const kandydat of python ? [python] : PYTHONY) {
+/** Runs the Python script; returns its JSON (last line of stdout). */
+async function run($: $T, argv: string[], stdin?: string): Promise<Result> {
+  const script = `${$.plugin.root}/scripts/convert.py`
+  let error = 'no Python on PATH (python / py / python3)'
+  for (const candidate of python ? [python] : PYTHONS) {
     try {
-      const r = await $.process.run([...kandydat, '-X', 'utf8', skrypt, ...argv], { stdin, timeoutMs: 600_000 })
-      const linia = r.stdout.trim().split('\n').pop() ?? ''
+      const r = await $.process.run([...candidate, '-X', 'utf8', script, ...argv], { stdin, timeoutMs: 600_000 })
+      const line = r.stdout.trim().split('\n').pop() ?? ''
       try {
-        const wynik = JSON.parse(linia) as Wynik
-        python = kandydat
-        return wynik
+        const result = JSON.parse(line) as Result
+        python = candidate
+        return result
       } catch {
-        blad = `${kandydat.join(' ')}: ${(r.stderr || r.stdout).trim().split('\n').slice(-3).join(' | ').slice(0, 400)}`
+        error = `${candidate.join(' ')}: ${(r.stderr || r.stdout).trim().split('\n').slice(-3).join(' | ').slice(0, 400)}`
       }
     } catch (err) {
-      blad = `${kandydat.join(' ')}: ${String(err).slice(0, 200)}`
+      error = `${candidate.join(' ')}: ${String(err).slice(0, 200)}`
     }
   }
-  return { ok: false, blad }
+  return { ok: false, error }
 }
 
-function zapamietaj(w: Wynik, zrodlo: string | null) {
-  if (w.folder) zrodla.set(norm(w.folder), zrodlo)
-  if (w.katalogZalacznika) zrodla.set(norm(w.katalogZalacznika), null)
+function remember(w: Result, source: string | null) {
+  if (w.folder) sources.set(norm(w.folder), source)
+  if (w.attachmentDir) sources.set(norm(w.attachmentDir), null)
 }
 
-/** Jedno wywołanie Pythona na plik naraz (równoległe Read tego samego pliku czekają na nie). */
-function raz($: $T, argv: string[]): Promise<Wynik> {
-  const klucz = norm(argv.join('|'))
-  let obietnica = wTrakcie.get(klucz)
-  if (!obietnica) {
-    obietnica = uruchom($, argv).finally(() => wTrakcie.delete(klucz))
-    wTrakcie.set(klucz, obietnica)
+/** One Python call per file at a time (parallel Reads of the same file wait for it). */
+function once($: $T, argv: string[]): Promise<Result> {
+  const key = norm(argv.join('|'))
+  let promise = inFlight.get(key)
+  if (!promise) {
+    promise = run($, argv).finally(() => inFlight.delete(key))
+    inFlight.set(key, promise)
   }
-  return obietnica
+  return promise
 }
 
-async function konwertuj($: $T, sciezka: string, wymus = false): Promise<Wynik> {
-  const w = await raz($, ['plik', sciezka, ...(wymus ? ['--wymus'] : [])])
+async function convert($: $T, path: string, force = false): Promise<Result> {
+  const w = await once($, ['file', path, ...(force ? ['--force'] : [])])
   if (w.ok) {
-    zapamietaj(w, w.zrodlo ?? sciezka)
-    if (!w.zCache) {
-      konwersjeSesji++
-      $.ui.toast(`markitdown: ${nazwa(sciezka)} → .md${w.obrazy ? ` (${w.obrazy} obr.)` : ''}`)
+    remember(w, w.source ?? path)
+    if (!w.cached) {
+      sessionConversions++
+      $.ui.toast(`markitdown: ${baseName(path)} → .md${w.images ? ` (${w.images} img)` : ''}`)
     }
   } else {
-    $.ui.toast(`markitdown: nie udało się (${nazwa(sciezka)}): ${w.blad}`, { timeoutMs: 8000 })
+    $.ui.toast(`markitdown: failed (${baseName(path)}): ${w.error}`, { timeoutMs: 8000 })
   }
   return w
 }
 
-function notka(w: Wynik, oryginal: string) {
-  let tekst = `forced-markitdown: plik ${oryginal} został automatycznie skonwertowany do Markdown przez markitdown (${w.md}).`
-  if (w.obrazy) {
-    tekst += ` Zawiera ${w.obrazy} obrazów zapisanych w ${w.obrazyDir} i podlinkowanych w treści - użyj Read na ścieżce obrazu, by go zobaczyć.`
+function note(w: Result, original: string) {
+  let text = `forced-markitdown: file ${original} was automatically converted to Markdown by markitdown (${w.md}).`
+  if (w.images) {
+    text += ` It contains ${w.images} images saved in ${w.imagesDir} and linked in the text - use Read on an image path to view it.`
   }
-  if (w.strony?.length) tekst += ' Strony PDF są oznaczone komentarzami <!-- strona N -->.'
-  if (w.podglady?.length) {
-    tekst += ` Strony z grafiką (wykresy, rysunki, tabele - także wektorowe, których nie ma w tekście): ${w.podglady.join(', ')}.` +
-      ' Każda ma znacznik <!-- strona N: grafika ... Read `…/strona_NNN.png` -->. Gdy pytanie lub tekst dotyczy rysunku,' +
-      ' wykresu, schematu albo tabeli, zrób Read na tej ścieżce: dostaniesz stronę przyciętą do grafiki (generowaną przy odczycie).'
+  if (w.pages?.length) text += ' PDF pages are marked with <!-- page N --> comments.'
+  if (w.previews?.length) {
+    text += ` Pages with graphics (charts, figures, tables - also vector ones not present in the text): ${w.previews.join(', ')}.` +
+      ' Each has a marker <!-- page N: graphics ... Read `…/page_NNN.png` -->. When the question or text concerns a drawing,' +
+      ' chart, diagram or table, Read that path: you get the page cropped to the graphic (generated on read).'
   }
-  return tekst
+  return text
 }
 
-/** Read(pages: "3-5") na PDF -> offset/limit w .md po znacznikach stron. */
-function zakresStron(pages: string, w: Wynik): { offset?: number; limit?: number } {
+/** Read(pages: "3-5") on a PDF -> offset/limit in the .md, based on the page markers. */
+function pageRange(pages: string, w: Result): { offset?: number; limit?: number } {
   const m = /^\s*(\d+)\s*(?:-\s*(\d+))?\s*$/.exec(pages)
-  const strony = w.strony ?? []
-  if (!m || !strony.length) return {}
-  const start = strony[Number(m[1]) - 1]
+  const list = w.pages ?? []
+  if (!m || !list.length) return {}
+  const start = list[Number(m[1]) - 1]
   if (start === undefined) return {}
-  const koniec = strony[Number(m[2] ?? m[1])] ?? (w.linie ?? start) + 1
-  return { offset: start, limit: Math.max(1, koniec - start) }
+  const end = list[Number(m[2] ?? m[1])] ?? (w.lines ?? start) + 1
+  return { offset: start, limit: Math.max(1, end - start) }
 }
 
-async function korzenCache($: $T) {
-  const dom = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
-  return dom ? norm(`${dom}/.claude/markitdown-cache`) : undefined
+async function cacheRoot($: $T) {
+  const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
+  return home ? norm(`${home}/.claude/markitdown-cache`) : undefined
 }
 
-/** Plik leży w folderze cache? Zwraca źródło (null = załącznik) albo undefined. */
-async function zrodloDla($: $T, sciezka: string): Promise<string | null | undefined> {
-  // Szybki filtr; decyduje i tak realPath niżej (ścieżka z `..` nie przejdzie).
-  if (!norm(sciezka).includes('markitdown-cache/') && !zrodla.size) return undefined
-  const st = await $.fs.stat(sciezka, { resolve: true }).catch(() => undefined)
+/** Is the file inside the cache folder? Returns its source (null = attachment) or undefined. */
+async function sourceFor($: $T, path: string): Promise<string | null | undefined> {
+  // Quick filter; the realPath check below decides anyway (a path with `..` won't pass).
+  if (!norm(path).includes('markitdown-cache/') && !sources.size) return undefined
+  const st = await $.fs.stat(path, { resolve: true }).catch(() => undefined)
   if (!st?.realPath) return undefined
-  const prawdziwa = norm(st.realPath)
-  for (const [folder, zrodlo] of zrodla) {
-    if (prawdziwa.startsWith(folder + '/')) return zrodlo
+  const real = norm(st.realPath)
+  for (const [folder, source] of sources) {
+    if (real.startsWith(folder + '/')) return source
   }
-  // Po przeładowaniu modułu / w nowej sesji: źródło z meta.json folderu w katalogu cache.
-  const korzen = await korzenCache($)
-  if (!korzen || !prawdziwa.startsWith(korzen + '/')) return undefined
-  const koniec = prawdziwa.indexOf('/', korzen.length + 1)
-  if (koniec < 0) return undefined
-  const folder = prawdziwa.slice(0, koniec)
-  const meta = await $.fs.read(`${folder}/meta.json`).then(t => JSON.parse(t) as Wynik).catch(() => undefined)
-  if (typeof meta?.zrodlo !== 'string') return undefined
-  const zrodlo = norm(meta.zrodlo).startsWith(`${korzen}/zalaczniki/`) ? null : meta.zrodlo
-  zrodla.set(folder, zrodlo)
-  return zrodlo
+  // After a module reload / in a new session: source from the folder's meta.json in the cache dir.
+  const root = await cacheRoot($)
+  if (!root || !real.startsWith(root + '/')) return undefined
+  const end = real.indexOf('/', root.length + 1)
+  if (end < 0) return undefined
+  const folder = real.slice(0, end)
+  const meta = await $.fs.read(`${folder}/meta.json`).then(t => JSON.parse(t) as Result).catch(() => undefined)
+  if (typeof meta?.source !== 'string') return undefined
+  const source = norm(meta.source).startsWith(`${root}/attachments/`) ? null : meta.source
+  sources.set(folder, source)
+  return source
 }
 
-async function czytajMedia($: $T, id: string): Promise<string | undefined> {
+async function readMedia($: $T, id: string): Promise<string | undefined> {
   let b64 = ''
   let offset: number | undefined = 0
   while (offset !== undefined) {
-    const kawalek = await $.prompt.media({ id, offset })
-    if (kawalek.base64 === undefined) return undefined
-    b64 += kawalek.base64
-    offset = kawalek.next
+    const chunk = await $.prompt.media({ id, offset })
+    if (chunk.base64 === undefined) return undefined
+    b64 += chunk.base64
+    offset = chunk.next
   }
   return b64
 }
@@ -177,130 +177,130 @@ const mb = (b: number) => `${(b / 1024 / 1024).toFixed(1)} MB`
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    for (const komenda of KOMENDY) await $.command.register(komenda)
-    if (!(await wlaczony($))) $.ui.status('markitdown: wył.')
+    for (const command of COMMANDS) await $.command.register(command)
+    if (!(await enabled($))) $.ui.status('markitdown: off')
     return next(e)
   })
 
-  // Model czyta plik -> dostaje .md. Podgląd strony z grafiką -> render przy pierwszym odczycie.
+  // Model reads a file -> gets .md. Page preview with graphics -> rendered at the first read.
   on('tool.call', { tool: 'Read' }, async ($, e, next) => {
-    if (PODGLAD.test(e.file_path)) {
+    if (PREVIEW_RE.test(e.file_path)) {
       if (!(await $.fs.exists(e.file_path))) {
-        const w = await raz($, ['podglad', e.file_path])
-        if (!w.ok) $.ui.toast(`markitdown: podgląd strony się nie udał: ${w.blad}`, { timeoutMs: 8000 })
+        const w = await once($, ['preview', e.file_path])
+        if (!w.ok) $.ui.toast(`markitdown: page preview failed: ${w.error}`, { timeoutMs: 8000 })
       }
       return next(e)
     }
-    if (!obslugiwany(e.file_path) || !(await wlaczony($))) return next(e)
-    const w = await konwertuj($, e.file_path)
+    if (!isSupported(e.file_path) || !(await enabled($))) return next(e)
+    const w = await convert($, e.file_path)
     if (!w.ok || !w.md) return next(e)
-    const { pages, ...reszta } = e
-    const wynik = await next({ ...reszta, file_path: w.md, ...(pages ? zakresStron(pages, w) : {}) })
-    if (wynik.deny !== undefined || wynik.isError) return wynik
-    return { ...wynik, context: [...(wynik.context ?? []), notka(w, e.file_path)] }
+    const { pages, ...rest } = e
+    const result = await next({ ...rest, file_path: w.md, ...(pages ? pageRange(pages, w) : {}) })
+    if (result.deny !== undefined || result.isError) return result
+    return { ...result, context: [...(result.context ?? []), note(w, e.file_path)] }
   })
 
-  // Uprawnienia: odczyt z cache oceniany jak odczyt oryginału (bez obchodzenia reguł).
+  // Permissions: reading from the cache is judged like reading the original (no bypassing rules).
   on('tool.check', { tool: 'Read' }, async ($, e, next) => {
-    const sciezka = (e.input as { file_path?: unknown } | undefined)?.file_path
-    if (typeof sciezka !== 'string') return next(e)
-    const zrodlo = await zrodloDla($, sciezka)
-    if (zrodlo === undefined) return next(e)
-    if (zrodlo === null) return { decision: 'allow', reason: 'forced-markitdown: załącznik użytkownika' }
-    return $.tool.check({ tool: 'Read', input: { file_path: zrodlo } })
+    const path = (e.input as { file_path?: unknown } | undefined)?.file_path
+    if (typeof path !== 'string') return next(e)
+    const source = await sourceFor($, path)
+    if (source === undefined) return next(e)
+    if (source === null) return { decision: 'allow', reason: 'forced-markitdown: user attachment' }
+    return $.tool.check({ tool: 'Read', input: { file_path: source } })
   })
 
-  // @plik.pdf w promptcie -> załącza .md.
+  // @file.pdf in the prompt -> attaches the .md.
   on('prompt.mention', async ($, e, next) => {
-    if (!obslugiwany(e.path) || !(await wlaczony($))) return next(e)
-    const w = await konwertuj($, e.path)
+    if (!isSupported(e.path) || !(await enabled($))) return next(e)
+    const w = await convert($, e.path)
     if (!w.ok || !w.md) return next(e)
-    const wynik = await next({ ...e, path: w.md })
-    if (wynik.deny !== undefined) return wynik
-    return { ...wynik, context: [...(wynik.context ?? []), notka(w, e.path)] }
+    const result = await next({ ...e, path: w.md })
+    if (result.deny !== undefined) return result
+    return { ...result, context: [...(result.context ?? []), note(w, e.path)] }
   })
 
-  // Wklejony/upuszczony dokument (blok document) -> treść .md w kontekście.
+  // Pasted/dropped document (document block) -> .md content in the context.
   on('prompt.submit', async ($, e, next) => {
-    const dokumenty = (e.attachments ?? []).filter(
-      a => a.type === 'document' && a.id && (a.mediaType === 'application/pdf' || obslugiwany(a.filename ?? '')),
+    const documents = (e.attachments ?? []).filter(
+      a => a.type === 'document' && a.id && (a.mediaType === 'application/pdf' || isSupported(a.filename ?? '')),
     )
-    if (!dokumenty.length || !(await wlaczony($))) return next(e)
-    const konteksty: string[] = []
-    let wszystkie = true
-    for (const [i, a] of dokumenty.entries()) {
-      const plik = a.filename ?? `zalacznik_${i + 1}.pdf`
-      const b64 = await czytajMedia($, a.id!)
-      const w = b64 ? await uruchom($, ['stdin', plik], b64) : { ok: false, blad: 'nie można odczytać załącznika' }
+    if (!documents.length || !(await enabled($))) return next(e)
+    const contexts: string[] = []
+    let all = true
+    for (const [i, a] of documents.entries()) {
+      const file = a.filename ?? `attachment_${i + 1}.pdf`
+      const b64 = await readMedia($, a.id!)
+      const w = b64 ? await run($, ['stdin', file], b64) : { ok: false, error: 'cannot read attachment' }
       if (!w.ok || !w.md) {
-        wszystkie = false
-        $.ui.toast(`markitdown: nie udało się (${plik}): ${w.blad}`, { timeoutMs: 8000 })
+        all = false
+        $.ui.toast(`markitdown: failed (${file}): ${w.error}`, { timeoutMs: 8000 })
         continue
       }
-      zapamietaj(w, null)
-      konwersjeSesji++
-      $.ui.toast(`markitdown: ${plik} → .md${w.obrazy ? ` (${w.obrazy} obr.)` : ''}`)
-      konteksty.push(`${notka(w, plik)}\n\nTreść (Markdown):\n\n${await $.fs.read(w.md)}`)
+      remember(w, null)
+      sessionConversions++
+      $.ui.toast(`markitdown: ${file} → .md${w.images ? ` (${w.images} img)` : ''}`)
+      contexts.push(`${note(w, file)}\n\nContent (Markdown):\n\n${await $.fs.read(w.md)}`)
     }
-    // Oryginalny blok document usuwamy tylko gdy wszystko się skonwertowało.
-    if (wszystkie) usunDokumenty = dokumenty.length
+    // The original document block is removed only when everything converted.
+    if (all) dropDocuments = documents.length
     try {
-      return await next(konteksty.length ? { ...e, context: [...(e.context ?? []), ...konteksty] } : e)
+      return await next(contexts.length ? { ...e, context: [...(e.context ?? []), ...contexts] } : e)
     } finally {
-      usunDokumenty = 0
+      dropDocuments = 0
     }
   })
 
   on('session.append', { door: 'prompt' }, ($, e, next) => {
-    if (!usunDokumenty) return next(e)
-    let ile = usunDokumenty
-    usunDokumenty = 0
-    const content = e.message.content.filter(b => !(b.type === 'document' && ile-- > 0))
+    if (!dropDocuments) return next(e)
+    let count = dropDocuments
+    dropDocuments = 0
+    const content = e.message.content.filter(b => !(b.type === 'document' && count-- > 0))
     return next({ ...e, message: { ...e.message, content } })
   })
 
   on('command.run', { command: 'markitdown-status' }, async $ => {
-    const i = await uruchom($, ['info'])
-    const linie = [
-      `forced-markitdown: ${(await wlaczony($)) ? 'WŁĄCZONY' : 'WYŁĄCZONY'}`,
+    const i = await run($, ['info'])
+    const lines = [
+      `forced-markitdown: ${(await enabled($)) ? 'ON' : 'OFF'}`,
       i.ok
-        ? `Python: ${i.python} (${i.wersjaPython}) | markitdown ${i.markitdown}`
-        : `Python/markitdown: BŁĄD - ${i.blad}`,
-      i.ok ? `Cache: ${i.cache} (${i.plikiMd} plików .md, ${mb(Number(i.bajty))})` : '',
-      `Konwersje w tej sesji: ${konwersjeSesji}`,
-      `Obsługiwane: ${OBSLUGIWANE.join(' ')}`,
+        ? `Python: ${i.python} (${i.pythonVersion}) | markitdown ${i.markitdown}`
+        : `Python/markitdown: ERROR - ${i.error}`,
+      i.ok ? `Cache: ${i.cache} (${i.mdFiles} .md files, ${mb(Number(i.bytes))})` : '',
+      `Conversions in this session: ${sessionConversions}`,
+      `Supported: ${SUPPORTED.join(' ')}`,
     ]
-    return { text: linie.filter(Boolean).join('\n') }
+    return { text: lines.filter(Boolean).join('\n') }
   })
 
   on('command.run', { command: 'markitdown-on' }, async $ => {
-    await ustawStan($, true)
-    return { text: 'forced-markitdown włączony: PDF/DOCX/PPTX/XLSX... trafią do modelu jako .md.' }
+    await setState($, true)
+    return { text: 'forced-markitdown enabled: PDF/DOCX/PPTX/XLSX... reach the model as .md.' }
   })
 
   on('command.run', { command: 'markitdown-off' }, async $ => {
-    await ustawStan($, false)
-    return { text: 'forced-markitdown wyłączony: pliki trafiają do modelu w oryginale.' }
+    await setState($, false)
+    return { text: 'forced-markitdown OFF: files reach the model in their original form.' }
   })
 
   on('command.run', { command: 'markitdown-convert' }, async ($, e) => {
-    const wymus = /(^|\s)--wymus(\s|$)/.test(e.args)
-    const sciezka = e.args.replace(/(^|\s)--wymus(\s|$)/, ' ').trim().replace(/^["']|["']$/g, '')
-    if (!sciezka) return { text: 'Użycie: /markitdown-convert <ścieżka> [--wymus]' }
-    const w = await konwertuj($, sciezka, wymus)
-    if (!w.ok) return { text: `Błąd konwersji ${sciezka}: ${w.blad}` }
+    const force = /(^|\s)--force(\s|$)/.test(e.args)
+    const path = e.args.replace(/(^|\s)--force(\s|$)/, ' ').trim().replace(/^["']|["']$/g, '')
+    if (!path) return { text: 'Usage: /markitdown-convert <path> [--force]' }
+    const w = await convert($, path, force)
+    if (!w.ok) return { text: `Conversion error ${path}: ${w.error}` }
     return {
-      text: `${notka(w, w.zrodlo ?? sciezka)}${w.zCache ? ' (z cache)' : ''}`,
+      text: `${note(w, w.source ?? path)}${w.cached ? ' (from cache)' : ''}`,
     }
   })
 
   on('command.run', { command: 'markitdown-clear' }, async $ => {
-    const w = await uruchom($, ['czysc'])
-    zrodla.clear()
+    const w = await run($, ['clear'])
+    sources.clear()
     return {
       text: w.ok
-        ? `Cache wyczyszczony: ${w.cache} (${w.plikiMd} plików .md, ${mb(Number(w.bajty))}).`
-        : `Błąd: ${w.blad}`,
+        ? `Cache cleared: ${w.cache} (${w.mdFiles} .md files, ${mb(Number(w.bytes))}).`
+        : `Error: ${w.error}`,
     }
   })
 }

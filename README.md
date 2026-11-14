@@ -4,8 +4,6 @@
 
 A Claude Code plugin (a hooks module, or "mod") that forces every PDF, DOCX, PPTX, XLSX and similar file through [microsoft/markitdown](https://github.com/microsoft/markitdown) before the model sees it. Drop a PDF in the chat or let Claude `Read` one, and the model gets a `.md` file. You don't type a conversion command and Claude doesn't have to remember to run one.
 
-> Polish note / Po polsku: plugin automatycznie podmienia dokumenty na Markdown z markitdown (z obrazami i podglądem wykresów), zanim trafią do modelu. Komunikaty i kod są po polsku.
-
 ---
 
 ## Why
@@ -28,7 +26,7 @@ Out of the box, Claude Code sends a PDF to the model as page images or as a docu
   - The page is rendered only when the model asks for it, and it's cropped tightly to the graphic, without margins, header, footer or logo.
   - Until then it costs nothing.
 - 📄 **Page-aware PDFs**
-  - The Markdown has `<!-- strona N -->` page markers.
+  - The Markdown has `<!-- page N -->` page markers.
   - `Read(pages: "3-5")` on a PDF is turned into the matching line range of the Markdown.
 - 🖨️ **Scanned PDFs work** - a page with no text layer is rendered to PNG, so the model can read it visually.
 - ⚡ **Cached**
@@ -77,7 +75,7 @@ In the desktop app, where `/plugin` doesn't run: click **+** next to the prompt 
 | `/markitdown-status` | On/off state, Python, markitdown version, cache size, conversions this session |
 | `/markitdown-on` | Turn automatic conversion on (default; remembered across sessions) |
 | `/markitdown-off` | Turn it off: Claude gets the original files |
-| `/markitdown-convert <path> [--wymus]` | Convert a file right now and print the `.md` path (`--wymus` skips the cache) |
+| `/markitdown-convert <path> [--force]` | Convert a file right now and print the `.md` path (`--force` skips the cache) |
 | `/markitdown-clear` | Delete the cache |
 
 ## Supported formats
@@ -92,13 +90,13 @@ In the desktop app, where `/plugin` doesn't run: click **+** next to the prompt 
 Read / @mention / pasted PDF
         │
         ▼
-hooks/register.ts ── python scripts/konwertuj.py ──► ~/.claude/markitdown-cache/<name>-<hash>/
+hooks/register.ts ── python scripts/convert.py ──► ~/.claude/markitdown-cache/<name>-<hash>/
         │                                               ├── <name>.md      (text + image links + page markers)
-        │                                               ├── obrazy/        (extracted images)
-        │                                               ├── strony/        (page previews, rendered on first Read)
+        │                                               ├── images/        (extracted images)
+        │                                               ├── pages/         (page previews, rendered on first Read)
         │                                               └── meta.json
         ▼
-model reads <name>.md, then Reads strona_NNN.png only when it needs a chart
+model reads <name>.md, then Reads page_NNN.png only when it needs a chart
 ```
 
 See [overview.md](overview.md) for the design notes: cache invalidation, header and footer detection, crop heuristics and the permission mapping.
@@ -118,7 +116,7 @@ See [overview.md](overview.md) for the design notes: cache invalidation, header 
 ## Development
 
 ```bash
-python -X utf8 scripts/konwertuj.py selftest
+python -X utf8 scripts/convert.py selftest
 ```
 
 ```bash
