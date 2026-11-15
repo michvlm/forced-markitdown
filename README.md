@@ -50,8 +50,6 @@ pip install "markitdown[all]"
 
 ## Install
 
-The repository is private for now, so you need read access on GitHub and a git credential for github.com, for example from `gh auth login` followed by `gh auth setup-git`.
-
 At the prompt of a Claude Code terminal session:
 
 ```
